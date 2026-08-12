@@ -1,0 +1,4 @@
+/root/Ai-infra/cmake_exp/build/CMakeFiles/math_lib.dir
+/root/Ai-infra/cmake_exp/build/CMakeFiles/main.dir
+/root/Ai-infra/cmake_exp/build/CMakeFiles/edit_cache.dir
+/root/Ai-infra/cmake_exp/build/CMakeFiles/rebuild_cache.dir

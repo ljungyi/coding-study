@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"/root/Ai-infra/cmake_exp/build/cmake_install.cmake"
+	],
+	"Parallel" : false
+}
