@@ -592,7 +592,7 @@ class Transformer(nn.Module):
                  ):
         super().__init__()
         self.frontend=frontend
-        self.Encoder=encoder
+        self.encoder=encoder
         self.decoder=decoder
         self.LM_head=nn.Linear(d_model,vocab_size)
 
