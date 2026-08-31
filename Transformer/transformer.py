@@ -572,7 +572,9 @@ class Decoder(nn.Module):
                 dec_input_ids:torch.Tensor,
                 enc_input,
                 mask_dec_attn,
-                mask_cross_attn):
+                mask_cross_attn,
+                need_kv_cache:bool=False,
+                ):
         dec_input=self.tgt_emb(dec_input_ids)
         seq_len=dec_input.size(1)
         dec_input=dec_input+self.pos_embed(torch.arange(0,seq_len,device=dec_input.device))
