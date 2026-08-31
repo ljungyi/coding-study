@@ -158,7 +158,10 @@ class MultiHeadAttention(nn.Module):
         Xq: torch.Tensor,
         Xk: torch.Tensor,
         Xv: torch.Tensor,
-        attn_mask: torch.Tensor
+        attn_mask: torch.Tensor,
+        use_kv_cache:bool=False,
+        past_K:torch.Tensor=None,
+        past_V:torch.Tensor=None
     ):
 
         """
@@ -202,6 +205,10 @@ class MultiHeadAttention(nn.Module):
             .view(N, -1, num_heads, d_head)
             .transpose(1, 2)
         )
+
+        if use_kv_cache:
+            K=torch.cat([past_K,K],dim=2)
+            V=torch.cat([past_V,V],dim=2)
 
         logits = (
             torch.matmul(
@@ -254,11 +261,11 @@ class MultiHeadAttention(nn.Module):
             )
         )
 
-        V = self.W_out(V)
-        V = self.dropout(V)
+        output = self.W_out(V)
+        output = self.dropout(output)
 
 
-        return V
+        return output
 
 
 def Position_embedding(
@@ -528,9 +535,12 @@ class DecoderLayer(nn.Module):
         self.norm3=nn.LayerNorm(d_model)
         
 
-    def forward(self,X,enc_X,decoder_mask,dec_enc_mask):
+    def forward(self,X,dec_x,enc_X,decoder_mask,dec_enc_mask,
+                kv_cache:bool=False,
+                K:torch.Tensor=None,
+                V=None):
         residual=X
-        out=self.decoder_attn(X,X,X,decoder_mask)
+        out=self.decoder_attn(X,dec_x,dec_x,decoder_mask,kv_cache,K,V)
         out=self.norm1(out+residual)
 
         residual=out
@@ -573,15 +583,41 @@ class Decoder(nn.Module):
                 enc_input,
                 mask_dec_attn,
                 mask_cross_attn,
-                need_kv_cache:bool=False,
+                need_kv_cache:bool,
+                KV_past:torch.Tensor
                 ):
-        dec_input=self.tgt_emb(dec_input_ids)
-        seq_len=dec_input.size(1)
-        dec_input=dec_input+self.pos_embed(torch.arange(0,seq_len,device=dec_input.device))
-        dec_input=self.dropout_emb(dec_input)
-        for layer in self.layers:
-            dec_input=layer(dec_input,enc_input,mask_dec_attn,mask_cross_attn)
-        return dec_input
+        if not need_kv_cache:
+            dec_input=self.tgt_emb(dec_input_ids)
+            seq_len=dec_input.size(1)
+            dec_input=dec_input+self.pos_embed(torch.arange(0,seq_len,device=dec_input.device))
+            dec_input=self.dropout_emb(dec_input)
+            for layer in self.layers:
+                dec_input=layer(dec_input,dec_input,enc_input,mask_dec_attn,mask_cross_attn)
+            return dec_input
+        else:
+            KV_cache=[]
+            i=0
+            dec_input=self.tgt_emb(dec_input_ids)
+            K_past,V_past=KV_past[i]
+            seq_len=K_past.size(1)
+            position=seq_len+1
+            dec_input=dec_input+self.pos_embed[position,:]
+            for layer in self.layers:
+                K_past,V_past=KV_past[i]
+                new_K=layer.decoder_attn.W_K(dec_input)
+                new_K=torch.cat([new_K,K_past],dim=1)
+                new_V=layer.decoder_attn.W_V(dec_input)
+                new_V=torch.cat([V_past,new_V],dim=1)
+                dec_input=layer.forward(dec_input,enc_input,mask_dec_attn,mask_cross_attn,
+                                        need_kv_cache,
+                                        new_K,
+                                        new_V)
+                KV_cache=KV_cache+[(new_K,new_V)]
+                i+=1
+            return KV_cache,dec_input
+                
+
+
 
 
 class Transformer(nn.Module):
