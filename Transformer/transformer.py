@@ -207,8 +207,13 @@ class MultiHeadAttention(nn.Module):
         )
 
         if use_kv_cache:
-            K=torch.cat([past_K,K],dim=2)
-            V=torch.cat([past_V,V],dim=2)
+
+            q_len+=1
+            k_len+=1
+            if past_K is not None:
+                K=torch.cat([past_K,K],dim=2)
+                V=torch.cat([past_V,V],dim=2)
+            
 
         logits = (
             torch.matmul(
@@ -249,6 +254,7 @@ class MultiHeadAttention(nn.Module):
         )
 
         attn = self.dropout(attn)
+        V_cache=V
 
         V = (
             torch.matmul(attn, V)
@@ -263,8 +269,9 @@ class MultiHeadAttention(nn.Module):
 
         output = self.W_out(V)
         output = self.dropout(output)
-
-
+        if use_kv_cache:
+         return output,K,V_cache
+        
         return output
 
 
@@ -535,14 +542,17 @@ class DecoderLayer(nn.Module):
         self.norm3=nn.LayerNorm(d_model)
         
 
-    def forward(self,X,dec_x,enc_X,decoder_mask,dec_enc_mask,
+    def forward(self,X,enc_X,decoder_mask,dec_enc_mask,
                 kv_cache:bool=False,
-                K:torch.Tensor=None,
-                V=None):
+                past_K:torch.Tensor=None,
+                past_V=None):
         residual=X
-        out=self.decoder_attn(X,dec_x,dec_x,decoder_mask,kv_cache,K,V)
-        out=self.norm1(out+residual)
+        if kv_cache:
+            out,K,V=self.decoder_attn(X,X,X,decoder_mask,kv_cache,past_K,past_V)
 
+        else:
+            out=self.decoder_attn(X,X,X,decoder_mask)
+        out=self.norm1(out+residual)
         residual=out
         out=self.cross_attn(out,enc_X,enc_X,dec_enc_mask)
         out=self.norm2(out+residual)
@@ -550,7 +560,7 @@ class DecoderLayer(nn.Module):
         residual=out
         out=self.ffn(out)
         out=self.norm3(out+residual)
-        return out
+        return out,K,V
 
 
 class Decoder(nn.Module):
@@ -584,7 +594,7 @@ class Decoder(nn.Module):
                 mask_dec_attn,
                 mask_cross_attn,
                 need_kv_cache:bool,
-                KV_past:torch.Tensor
+                KV_past:torch.Tensor,
                 ):
         if not need_kv_cache:
             dec_input=self.tgt_emb(dec_input_ids)
@@ -592,27 +602,29 @@ class Decoder(nn.Module):
             dec_input=dec_input+self.pos_embed(torch.arange(0,seq_len,device=dec_input.device))
             dec_input=self.dropout_emb(dec_input)
             for layer in self.layers:
-                dec_input=layer(dec_input,dec_input,enc_input,mask_dec_attn,mask_cross_attn)
+                dec_input=layer.forward(dec_input,enc_input,mask_dec_attn,mask_cross_attn)
             return dec_input
         else:
             KV_cache=[]
             i=0
             dec_input=self.tgt_emb(dec_input_ids)
-            K_past,V_past=KV_past[i]
-            seq_len=K_past.size(1)
-            position=seq_len+1
-            dec_input=dec_input+self.pos_embed[position,:]
-            for layer in self.layers:
+            if KV_past is None:
+                position=0
+            else:
                 K_past,V_past=KV_past[i]
-                new_K=layer.decoder_attn.W_K(dec_input)
-                new_K=torch.cat([new_K,K_past],dim=1)
-                new_V=layer.decoder_attn.W_V(dec_input)
-                new_V=torch.cat([V_past,new_V],dim=1)
-                dec_input=layer.forward(dec_input,enc_input,mask_dec_attn,mask_cross_attn,
+                position=K_past.size(1)
+
+            dec_input=dec_input+self.pos_embed[torch.tensor(position,device=dec_input_ids.device)]
+            for layer in self.layers:
+                if KV_past is not None:
+                    K_past,V_past=KV_past[i]
+                else:
+                    K_past,V_past=None,None
+                dec_input,K_new,V_new=layer(dec_input,enc_input,mask_dec_attn,mask_cross_attn,
                                         need_kv_cache,
-                                        new_K,
-                                        new_V)
-                KV_cache=KV_cache+[(new_K,new_V)]
+                                        K_past,
+                                        V_past)
+                KV_cache=KV_cache+[(K_new,V_new)]
                 i+=1
             return KV_cache,dec_input
                 
@@ -639,17 +651,27 @@ class Transformer(nn.Module):
                 enc_lens:torch.Tensor,
                 dec_lens:torch.Tensor,
                 dec_input_ids:torch.Tensor,
-                ):
+                need_kv_cache:bool=False,
+                KV_past:torch.Tensor=None,
+                seq_len:int=0               
+              ):
         enc_input=self.frontend(enc_input)
         batch_size=enc_input.size(0)
         max_enc_len=enc_input.size(1)
         enc_mask=get_enc_mask(batch_size,max_enc_len,enc_lens,device=enc_input.device)
         enc_out=self.Encoder(enc_input,enc_mask)
-
-        max_dec_len=dec_input_ids.size(1)
-        dec_mask=get_dec_mask(batch_size,max_dec_len,dec_lens,dec_input_ids.device)
-        dec_enc_mask=get_dec_enc_mask(batch_size,max_enc_len,enc_lens,max_dec_len,dec_input_ids.device)
-        dec_out=self.decoder(dec_input_ids,enc_out,dec_mask,dec_enc_mask)
-
-        return self.LM_head(dec_out)
+        
+        if not need_kv_cache:
+            max_dec_len=dec_input_ids.size(1)
+            dec_mask=get_dec_mask(batch_size,max_dec_len,dec_lens,dec_input_ids.device)
+            dec_enc_mask=get_dec_enc_mask(batch_size,max_enc_len,enc_lens,max_dec_len,dec_input_ids.device)
+            dec_out=self.decoder(dec_input_ids,enc_out,dec_mask,dec_enc_mask)
+        else:
+            max_dec_len=1
+            dec_mask=torch.ones([batch_size,1,seq_len],device=dec_input_ids.device)
+            dec_enc_mask=get_dec_enc_mask(batch_size,max_enc_len,enc_lens,max_dec_len,dec_input_ids.device)
+            dec_out,KV_cache=self.decoder(dec_input_ids,enc_out,dec_mask,dec_enc_mask,
+                                         need_kv_cache,KV_past)
+        
+        return self.LM_head(dec_out),KV_cache
 
