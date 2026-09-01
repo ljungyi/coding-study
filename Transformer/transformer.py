@@ -208,7 +208,7 @@ class MultiHeadAttention(nn.Module):
 
         if use_kv_cache:
 
-            q_len+=1
+            q_len=1
             k_len+=1
             if past_K is not None:
                 K=torch.cat([past_K,K],dim=2)
@@ -560,7 +560,10 @@ class DecoderLayer(nn.Module):
         residual=out
         out=self.ffn(out)
         out=self.norm3(out+residual)
-        return out,K,V
+        if kv_cache:
+            return out,K,V
+        
+        return out
 
 
 class Decoder(nn.Module):
@@ -593,8 +596,8 @@ class Decoder(nn.Module):
                 enc_input,
                 mask_dec_attn,
                 mask_cross_attn,
-                need_kv_cache:bool,
-                KV_past:torch.Tensor,
+                need_kv_cache:bool=False,
+                KV_past:torch.Tensor=None,
                 ):
         if not need_kv_cache:
             dec_input=self.tgt_emb(dec_input_ids)
@@ -612,7 +615,7 @@ class Decoder(nn.Module):
                 position=0
             else:
                 K_past,V_past=KV_past[i]
-                position=K_past.size(1)
+                position=K_past.size(2)
 
             dec_input=dec_input+self.pos_embed[torch.tensor(position,device=dec_input_ids.device)]
             for layer in self.layers:
@@ -626,7 +629,7 @@ class Decoder(nn.Module):
                                         V_past)
                 KV_cache=KV_cache+[(K_new,V_new)]
                 i+=1
-            return KV_cache,dec_input
+            return dec_input,KV_cache
                 
 
 
@@ -652,14 +655,13 @@ class Transformer(nn.Module):
                 dec_lens:torch.Tensor,
                 dec_input_ids:torch.Tensor,
                 need_kv_cache:bool=False,
-                KV_past:torch.Tensor=None,
-                seq_len:int=0               
+                KV_past:torch.Tensor=None,              
               ):
         enc_input=self.frontend(enc_input)
         batch_size=enc_input.size(0)
         max_enc_len=enc_input.size(1)
         enc_mask=get_enc_mask(batch_size,max_enc_len,enc_lens,device=enc_input.device)
-        enc_out=self.Encoder(enc_input,enc_mask)
+        enc_out=self.encoder(enc_input,enc_mask)
         
         if not need_kv_cache:
             max_dec_len=dec_input_ids.size(1)
@@ -668,10 +670,13 @@ class Transformer(nn.Module):
             dec_out=self.decoder(dec_input_ids,enc_out,dec_mask,dec_enc_mask)
         else:
             max_dec_len=1
-            dec_mask=torch.ones([batch_size,1,seq_len],device=dec_input_ids.device)
+            #dec_mask=torch.zeros([batch_size,1,seq_len],device=dec_input_ids.device) #不好！删掉
+            dec_mask=None
             dec_enc_mask=get_dec_enc_mask(batch_size,max_enc_len,enc_lens,max_dec_len,dec_input_ids.device)
             dec_out,KV_cache=self.decoder(dec_input_ids,enc_out,dec_mask,dec_enc_mask,
                                          need_kv_cache,KV_past)
-        
-        return self.LM_head(dec_out),KV_cache
+        if need_kv_cache:
+            return self.LM_head(dec_out),KV_cache
+        else:
+            return self.LM_head(dec_out)
 
