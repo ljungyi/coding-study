@@ -161,7 +161,8 @@ class MultiHeadAttention(nn.Module):
         attn_mask: torch.Tensor,
         use_kv_cache:bool=False,
         past_K:torch.Tensor=None,
-        past_V:torch.Tensor=None
+        past_V:torch.Tensor=None,
+        length:int=0
     ):
 
         """
@@ -181,9 +182,6 @@ class MultiHeadAttention(nn.Module):
         """
 
         N = Xq.size(0)
-
-        q_len = Xq.size(1)
-        k_len = Xk.size(1)
 
         d_head = self.d_head
         num_heads = self.num_heads
@@ -207,12 +205,14 @@ class MultiHeadAttention(nn.Module):
         )
 
         if use_kv_cache:
+                
+                past_K[:,:,length:length+1,:]=K
+                past_V[:,:,length:length+1,:]=V
+                K=past_K[:,:,0:length+1,:]
+                V=past_V[:,:,0:length+1,:]
 
-            q_len=1
-            k_len+=1
-            if past_K is not None:
-                K=torch.cat([past_K,K],dim=2)
-                V=torch.cat([past_V,V],dim=2)
+        q_len=Q.size(2)
+        k_len=K.size(2)
             
 
         logits = (
@@ -254,9 +254,8 @@ class MultiHeadAttention(nn.Module):
         )
 
         attn = self.dropout(attn)
-        V_cache=V
 
-        V = (
+        context = (
             torch.matmul(attn, V)
             .transpose(1, 2)
             .contiguous()
@@ -267,10 +266,10 @@ class MultiHeadAttention(nn.Module):
             )
         )
 
-        output = self.W_out(V)
+        output = self.W_out(context)
         output = self.dropout(output)
         if use_kv_cache:
-         return output,K,V_cache
+         return output,past_K,past_V
         
         return output
 
@@ -545,10 +544,11 @@ class DecoderLayer(nn.Module):
     def forward(self,X,enc_X,decoder_mask,dec_enc_mask,
                 kv_cache:bool=False,
                 past_K:torch.Tensor=None,
-                past_V=None):
+                past_V:torch.Tensor=None,
+                length:int=0):
         residual=X
         if kv_cache:
-            out,K,V=self.decoder_attn(X,X,X,decoder_mask,kv_cache,past_K,past_V)
+            out,new_K_layer,new_V_layer=self.decoder_attn(X,X,X,decoder_mask,kv_cache,past_K,past_V,length)
 
         else:
             out=self.decoder_attn(X,X,X,decoder_mask)
@@ -561,7 +561,7 @@ class DecoderLayer(nn.Module):
         out=self.ffn(out)
         out=self.norm3(out+residual)
         if kv_cache:
-            return out,K,V
+            return out,new_K_layer,new_V_layer
         
         return out
 
@@ -597,7 +597,7 @@ class Decoder(nn.Module):
                 mask_dec_attn,
                 mask_cross_attn,
                 need_kv_cache:bool=False,
-                KV_past:torch.Tensor=None,
+                KV_cache:dict=None,
                 ):
         if not need_kv_cache:
             dec_input=self.tgt_emb(dec_input_ids)
@@ -608,27 +608,20 @@ class Decoder(nn.Module):
                 dec_input=layer.forward(dec_input,enc_input,mask_dec_attn,mask_cross_attn)
             return dec_input
         else:
-            KV_cache=[]
-            i=0
             dec_input=self.tgt_emb(dec_input_ids)
-            if KV_past is None:
-                position=0
-            else:
-                K_past,V_past=KV_past[i]
-                position=K_past.size(2)
+            position=KV_cache["length"]
+            K_past,V_past=KV_cache["K_cache"],KV_cache["V_cache"]
 
-            dec_input=dec_input+self.pos_embed[torch.tensor(position,device=dec_input_ids.device)]
-            for layer in self.layers:
-                if KV_past is not None:
-                    K_past,V_past=KV_past[i]
-                else:
-                    K_past,V_past=None,None
+            dec_input=dec_input+self.pos_embed(torch.tensor(position,device=dec_input_ids.device))
+            for i,layer in enumerate(self.layers):
                 dec_input,K_new,V_new=layer(dec_input,enc_input,mask_dec_attn,mask_cross_attn,
                                         need_kv_cache,
-                                        K_past,
-                                        V_past)
-                KV_cache=KV_cache+[(K_new,V_new)]
-                i+=1
+                                        K_past[i,:,:,:,:],
+                                        V_past[i,:,:,:,:],
+                                        KV_cache["length"])
+                KV_cache["K_cache"][i,:,:,:,:]=K_new
+                KV_cache["V_cache"][i,:,:,:,:]=V_new
+            KV_cache["length"]+=1
             return dec_input,KV_cache
                 
 

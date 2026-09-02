@@ -6,7 +6,7 @@ d_model=16
 d_ffn=d_model*4
 num_heads=4
 num_layers=4
-max_len=16
+max_len=2048
 dropout=0
 
 

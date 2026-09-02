@@ -1,0 +1,46 @@
+# Improved:
+# Encoder computed once.
+# Using KV cache
+
+import time
+import torch
+from data import build_data,tgt_vocab
+from model_setup import init_model,d_model,num_heads,num_layers,max_len
+from generate import generate
+
+torch.manual_seed(42)
+torch.cuda.reset_peak_memory_stats()
+device=torch.device("cuda" if torch.cuda.is_available()
+                    else "cpu")
+print("device =", device)
+
+
+(src_input_ids,src_lens,
+ dec_input_ids,dec_lens,
+ target_ids,target_lens,
+)=build_data()
+bos = tgt_vocab["<BOS>"]
+eos = tgt_vocab["<EOS>"]
+pad = tgt_vocab["<PAD>"]
+batch_size=src_input_ids.size(0)
+
+model=init_model()
+state_dict=torch.load("Transformer/checkpoint/toy_transformer.pt",map_location=device)
+model.load_state_dict(state_dict)
+model=model.to(device)
+src_input_ids=src_input_ids.to(device)
+max_new_tokens=1000
+d_heads=d_model//num_heads
+torch.cuda.synchronize()
+start=time.time()
+_=generate(model,device,src_input_ids,src_lens,
+           max_new_tokens,
+           bos,pad,eos,
+           True,
+           max_len,
+           d_heads,
+           num_layers,
+           num_heads)
+torch.cuda.synchronize()
+end=time.time()
+print(f"consumed {end-start}s")
